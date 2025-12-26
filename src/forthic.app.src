@@ -1,0 +1,15 @@
+{application, forthic,
+ [{description, "Forthic stack-based language runtime for Erlang"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {forthic_app, []}},
+  {applications, [
+      kernel,
+      stdlib,
+      jsx
+  ]},
+  {env,[]},
+  {modules, []},
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.

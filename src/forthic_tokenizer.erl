@@ -1,0 +1,475 @@
+-module(forthic_tokenizer).
+
+-export([
+    new/1, new/2, new/3,
+    next_token/1
+]).
+
+-include("forthic_tokenizer.hrl").
+
+%% ============================================================================
+%% Token Types
+%% ============================================================================
+
+-define(TOKEN_STRING, string).
+-define(TOKEN_COMMENT, comment).
+-define(TOKEN_START_ARRAY, start_array).
+-define(TOKEN_END_ARRAY, end_array).
+-define(TOKEN_START_MODULE, start_module).
+-define(TOKEN_END_MODULE, end_module).
+-define(TOKEN_START_DEF, start_def).
+-define(TOKEN_END_DEF, end_def).
+-define(TOKEN_START_MEMO, start_memo).
+-define(TOKEN_WORD, word).
+-define(TOKEN_DOT_SYMBOL, dot_symbol).
+-define(TOKEN_EOS, eos).
+
+%% ============================================================================
+%% Public API
+%% ============================================================================
+
+new(InputString) ->
+    new(InputString, #code_location{}, false).
+
+new(InputString, ReferenceLocation) ->
+    new(InputString, ReferenceLocation, false).
+
+new(InputString, ReferenceLocation, Streaming) ->
+    RefLoc = case ReferenceLocation of
+        undefined -> #code_location{};
+        _ -> ReferenceLocation
+    end,
+    #tokenizer{
+        reference_location = RefLoc,
+        line = RefLoc#code_location.line,
+        column = RefLoc#code_location.column,
+        input_string = unescape_string(InputString),
+        input_pos = 0,
+        whitespace = [$\s, $\t, $\n, $\r, $(, $), $,],
+        quote_chars = [$", $', $^],
+        token_start_pos = 0,
+        token_end_pos = 0,
+        token_line = 0,
+        token_column = 0,
+        token_string = "",
+        string_delta = undefined,
+        streaming = Streaming
+    }.
+
+next_token(T) ->
+    T2 = clear_token_string(T),
+    transition_from_START(T2).
+
+%% ============================================================================
+%% Helper Functions
+%% ============================================================================
+
+unescape_string(S) ->
+    S1 = re:replace(S, "&lt;", "<", [global, {return, list}]),
+    re:replace(S1, "&gt;", ">", [global, {return, list}]).
+
+clear_token_string(T) ->
+    T#tokenizer{token_string = ""}.
+
+note_start_token(T = #tokenizer{input_pos = Pos, reference_location = RefLoc, line = Line, column = Col}) ->
+    T#tokenizer{
+        token_start_pos = Pos + RefLoc#code_location.start_pos,
+        token_line = Line,
+        token_column = Col
+    }.
+
+is_whitespace(Ch, #tokenizer{whitespace = WS}) ->
+    lists:member(Ch, WS).
+
+is_quote(Ch, #tokenizer{quote_chars = QC}) ->
+    lists:member(Ch, QC).
+
+is_triple_quote(Index, Ch, #tokenizer{input_string = Input} = T) ->
+    case is_quote(Ch, T) of
+        false -> false;
+        true when Index + 2 >= length(Input) -> false;
+        true ->
+            C2 = lists:nth(Index + 2, Input),
+            C3 = lists:nth(Index + 3, Input),
+            C2 =:= Ch andalso C3 =:= Ch
+    end.
+
+is_start_memo(Index, #tokenizer{input_string = Input}) ->
+    if
+        Index + 1 >= length(Input) -> false;
+        true ->
+            C1 = lists:nth(Index + 1, Input),
+            C2 = lists:nth(Index + 2, Input),
+            C1 =:= $@ andalso C2 =:= $:
+    end.
+
+advance_position(NumChars, T = #tokenizer{input_pos = Pos, input_string = Input, line = Line, column = Col}) ->
+    if
+        NumChars >= 0 ->
+            advance_forward(NumChars, T, Pos, Line, Col);
+        true ->
+            advance_backward(-NumChars, T, Pos, Line, Col)
+    end.
+
+advance_forward(0, T, Pos, Line, Col) ->
+    T#tokenizer{input_pos = Pos, line = Line, column = Col};
+advance_forward(N, T = #tokenizer{input_string = Input}, Pos, Line, Col) when Pos < length(Input) ->
+    Ch = lists:nth(Pos + 1, Input),
+    {NewLine, NewCol} = case Ch of
+        $\n -> {Line + 1, 1};
+        _ -> {Line, Col + 1}
+    end,
+    advance_forward(N - 1, T, Pos + 1, NewLine, NewCol);
+advance_forward(_, T, Pos, Line, Col) ->
+    T#tokenizer{input_pos = Pos, line = Line, column = Col}.
+
+advance_backward(0, T, Pos, Line, Col) ->
+    T#tokenizer{input_pos = Pos, line = Line, column = Col};
+advance_backward(N, T = #tokenizer{input_string = Input}, Pos, Line, Col) when Pos > 0 ->
+    NewPos = Pos - 1,
+    Ch = lists:nth(NewPos + 1, Input),
+    {NewLine, NewCol} = case Ch of
+        $\n -> {Line - 1, 1};
+        _ -> {Line, Col - 1}
+    end,
+    advance_backward(N - 1, T, NewPos, NewLine, NewCol);
+advance_backward(_, T, Pos, Line, Col) ->
+    T#tokenizer{input_pos = Pos, line = Line, column = Col}.
+
+get_token_location(#tokenizer{reference_location = RefLoc, token_line = Line, token_column = Col,
+                               token_start_pos = StartPos, token_string = TokStr}) ->
+    #code_location{
+        source = RefLoc#code_location.source,
+        line = Line,
+        column = Col,
+        start_pos = StartPos,
+        end_pos = StartPos + length(TokStr)
+    }.
+
+%% ============================================================================
+%% State Transitions
+%% ============================================================================
+
+transition_from_START(T = #tokenizer{input_pos = Pos, input_string = Input}) when Pos >= length(Input) ->
+    {ok, #token{type = ?TOKEN_EOS, string = "", location = get_token_location(T)}, T};
+transition_from_START(T = #tokenizer{input_pos = Pos, input_string = Input}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = note_start_token(T),
+    T3 = advance_position(1, T2),
+
+    case is_whitespace(Ch, T) of
+        true -> transition_from_START(T3);
+        false ->
+            case Ch of
+                $# -> transition_from_COMMENT(T3);
+                $: -> transition_from_START_DEFINITION(T3);
+                $@ ->
+                    % Check if this is start of memo (@:)
+                    case is_start_memo(Pos, T) of
+                        true ->
+                            T4 = advance_position(1, T3), % Skip over ":" in "@:"
+                            transition_from_START_MEMO(T4);
+                        false ->
+                            T4 = advance_position(-1, T3), % Back up to beginning of word
+                            transition_from_GATHER_WORD(T4)
+                    end;
+                $; ->
+                    T4 = T3#tokenizer{token_string = ";"},
+                    {ok, #token{type = ?TOKEN_END_DEF, string = ";", location = get_token_location(T4)}, T4};
+                $[ ->
+                    T4 = T3#tokenizer{token_string = "["},
+                    {ok, #token{type = ?TOKEN_START_ARRAY, string = "[", location = get_token_location(T4)}, T4};
+                $] ->
+                    T4 = T3#tokenizer{token_string = "]"},
+                    {ok, #token{type = ?TOKEN_END_ARRAY, string = "]", location = get_token_location(T4)}, T4};
+                ${ -> transition_from_GATHER_MODULE(T3);
+                $} ->
+                    T4 = T3#tokenizer{token_string = "}"},
+                    {ok, #token{type = ?TOKEN_END_MODULE, string = "}", location = get_token_location(T4)}, T4};
+                $. ->
+                    T4 = advance_position(-1, T3), % Back up to beginning of dot symbol
+                    transition_from_GATHER_DOT_SYMBOL(T4);
+                _ ->
+                    % Check for triple quote string
+                    case is_triple_quote(Pos, Ch, T) of
+                        true ->
+                            T4 = advance_position(2, T3), % Skip over 2nd and 3rd quote chars
+                            transition_from_GATHER_TRIPLE_QUOTE_STRING(Ch, T4);
+                        false ->
+                            % Check for single quote string
+                            case is_quote(Ch, T) of
+                                true ->
+                                    transition_from_GATHER_STRING(Ch, T3);
+                                false ->
+                                    T4 = advance_position(-1, T3), % Back up to beginning of word
+                                    transition_from_GATHER_WORD(T4)
+                            end
+                    end
+            end
+    end.
+
+transition_from_COMMENT(T) ->
+    T2 = note_start_token(T),
+    gather_comment(T2).
+
+gather_comment(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}) when Pos >= length(Input) ->
+    {ok, #token{type = ?TOKEN_COMMENT, string = TokStr, location = get_token_location(T)}, T};
+gather_comment(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = T#tokenizer{token_string = TokStr ++ [Ch]},
+    T3 = advance_position(1, T2),
+    case Ch of
+        $\n ->
+            T4 = advance_position(-1, T3),
+            {ok, #token{type = ?TOKEN_COMMENT, string = T4#tokenizer.token_string, location = get_token_location(T4)}, T4};
+        _ ->
+            gather_comment(T3)
+    end.
+
+transition_from_START_DEFINITION(T) ->
+    start_definition_loop(T).
+
+start_definition_loop(T = #tokenizer{input_pos = Pos, input_string = Input}) when Pos >= length(Input) ->
+    {error, "Got EOS in START_DEFINITION"};
+start_definition_loop(T = #tokenizer{input_pos = Pos, input_string = Input}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    case is_whitespace(Ch, T) of
+        true -> start_definition_loop(T2);
+        false ->
+            case is_quote(Ch, T) of
+                true -> {error, "Definition names can't have quotes in them"};
+                false ->
+                    T3 = advance_position(-1, T2),
+                    transition_from_GATHER_DEFINITION_NAME(T3)
+            end
+    end.
+
+transition_from_START_MEMO(T) ->
+    start_memo_loop(T).
+
+start_memo_loop(T = #tokenizer{input_pos = Pos, input_string = Input}) when Pos >= length(Input) ->
+    {error, "Got EOS in START_MEMO"};
+start_memo_loop(T = #tokenizer{input_pos = Pos, input_string = Input}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    case is_whitespace(Ch, T) of
+        true -> start_memo_loop(T2);
+        false ->
+            case is_quote(Ch, T) of
+                true -> {error, "Memo names can't have quotes in them"};
+                false ->
+                    T3 = advance_position(-1, T2),
+                    transition_from_GATHER_MEMO_NAME(T3)
+            end
+    end.
+
+transition_from_GATHER_DEFINITION_NAME(T) ->
+    T2 = note_start_token(T),
+    case gather_definition_name(T2) of
+        {ok, T3} ->
+            {ok, #token{type = ?TOKEN_START_DEF, string = T3#tokenizer.token_string, location = get_token_location(T3)}, T3};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+transition_from_GATHER_MEMO_NAME(T) ->
+    T2 = note_start_token(T),
+    case gather_definition_name(T2) of
+        {ok, T3} ->
+            {ok, #token{type = ?TOKEN_START_MEMO, string = T3#tokenizer.token_string, location = get_token_location(T3)}, T3};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+gather_definition_name(T = #tokenizer{input_pos = Pos, input_string = Input}) when Pos >= length(Input) ->
+    {ok, T};
+gather_definition_name(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    case is_whitespace(Ch, T) of
+        true -> {ok, T};
+        false ->
+            case is_quote(Ch, T) of
+                true -> {error, "Definition names can't have quotes in them"};
+                false ->
+                    case lists:member(Ch, "[]{}") of
+                        true -> {error, io_lib:format("Definition names can't have '~c' in them", [Ch])};
+                        false ->
+                            T3 = T2#tokenizer{token_string = TokStr ++ [Ch]},
+                            gather_definition_name(T3)
+                    end
+            end
+    end.
+
+transition_from_GATHER_MODULE(T) ->
+    T2 = note_start_token(T),
+    gather_module(T2).
+
+gather_module(T = #tokenizer{input_pos = Pos, input_string = Input}) when Pos >= length(Input) ->
+    {ok, #token{type = ?TOKEN_START_MODULE, string = T#tokenizer.token_string, location = get_token_location(T)}, T};
+gather_module(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    case is_whitespace(Ch, T) of
+        true ->
+            {ok, #token{type = ?TOKEN_START_MODULE, string = TokStr, location = get_token_location(T)}, T};
+        false ->
+            case Ch of
+                $} ->
+                    T3 = advance_position(-1, T2),
+                    {ok, #token{type = ?TOKEN_START_MODULE, string = TokStr, location = get_token_location(T3)}, T3};
+                _ ->
+                    T3 = T2#tokenizer{token_string = TokStr ++ [Ch]},
+                    gather_module(T3)
+            end
+    end.
+
+transition_from_GATHER_TRIPLE_QUOTE_STRING(Delim, T) ->
+    T2 = note_start_token(T),
+    T3 = T2#tokenizer{string_delta = #string_delta{start = T2#tokenizer.input_pos, end_pos = T2#tokenizer.input_pos}},
+    gather_triple_quote_string(Delim, T3).
+
+gather_triple_quote_string(Delim, T = #tokenizer{input_pos = Pos, input_string = Input, streaming = Streaming}) when Pos >= length(Input) ->
+    case Streaming of
+        true -> {ok, nil, T};
+        false -> {error, "Unterminated string"}
+    end;
+gather_triple_quote_string(Delim, T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr, string_delta = Delta}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    case Ch =:= Delim andalso is_triple_quote(Pos, Ch, T) of
+        true ->
+            % Check if this triple quote is followed by at least one more quote (greedy mode trigger)
+            case Pos + 3 < length(Input) andalso lists:nth(Pos + 4, Input) =:= Delim of
+                true ->
+                    % Greedy mode: include this quote as content and continue looking for the end
+                    T2 = advance_position(1, T),
+                    T3 = T2#tokenizer{token_string = TokStr ++ [Delim], string_delta = Delta#string_delta{end_pos = T2#tokenizer.input_pos}},
+                    gather_triple_quote_string(Delim, T3);
+                false ->
+                    % Normal behavior: close at first triple quote
+                    T2 = advance_position(3, T),
+                    T3 = T2#tokenizer{string_delta = undefined},
+                    {ok, #token{type = ?TOKEN_STRING, string = TokStr, location = get_token_location(T3)}, T3}
+            end;
+        false ->
+            T2 = advance_position(1, T),
+            T3 = T2#tokenizer{token_string = TokStr ++ [Ch], string_delta = Delta#string_delta{end_pos = T2#tokenizer.input_pos}},
+            gather_triple_quote_string(Delim, T3)
+    end.
+
+transition_from_GATHER_STRING(Delim, T) ->
+    T2 = note_start_token(T),
+    T3 = T2#tokenizer{string_delta = #string_delta{start = T2#tokenizer.input_pos, end_pos = T2#tokenizer.input_pos}},
+    gather_string(Delim, T3).
+
+gather_string(Delim, T = #tokenizer{input_pos = Pos, input_string = Input, streaming = Streaming}) when Pos >= length(Input) ->
+    case Streaming of
+        true -> {ok, nil, T};
+        false -> {error, "Unterminated string"}
+    end;
+gather_string(Delim, T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr, string_delta = Delta}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    case Ch of
+        Delim ->
+            T3 = T2#tokenizer{string_delta = undefined},
+            {ok, #token{type = ?TOKEN_STRING, string = TokStr, location = get_token_location(T3)}, T3};
+        _ ->
+            T3 = T2#tokenizer{token_string = TokStr ++ [Ch], string_delta = Delta#string_delta{end_pos = T2#tokenizer.input_pos}},
+            gather_string(Delim, T3)
+    end.
+
+transition_from_GATHER_WORD(T) ->
+    T2 = note_start_token(T),
+    gather_word(T2).
+
+gather_word(T = #tokenizer{input_pos = Pos, input_string = Input}) when Pos >= length(Input) ->
+    {ok, #token{type = ?TOKEN_WORD, string = T#tokenizer.token_string, location = get_token_location(T)}, T};
+gather_word(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    case is_whitespace(Ch, T) of
+        true ->
+            {ok, #token{type = ?TOKEN_WORD, string = TokStr, location = get_token_location(T)}, T};
+        false ->
+            case lists:member(Ch, ";{}#") of
+                true ->
+                    T3 = advance_position(-1, T2),
+                    {ok, #token{type = ?TOKEN_WORD, string = TokStr, location = get_token_location(T3)}, T3};
+                false ->
+                    % Handle RFC 9557 datetime with IANA timezone
+                    case Ch of
+                        $[ ->
+                            % Check if this looks like a datetime (has 'T' in it)
+                            case string:str(TokStr, "T") > 0 of
+                                true ->
+                                    % This looks like a datetime, gather until ']'
+                                    T3 = T2#tokenizer{token_string = TokStr ++ [Ch]},
+                                    gather_word_timezone(T3);
+                                false ->
+                                    % Not a datetime, treat '[' as delimiter
+                                    T3 = advance_position(-1, T2),
+                                    {ok, #token{type = ?TOKEN_WORD, string = TokStr, location = get_token_location(T3)}, T3}
+                            end;
+                        $] ->
+                            T3 = advance_position(-1, T2),
+                            {ok, #token{type = ?TOKEN_WORD, string = TokStr, location = get_token_location(T3)}, T3};
+                        _ ->
+                            T3 = T2#tokenizer{token_string = TokStr ++ [Ch]},
+                            gather_word(T3)
+                    end
+            end
+    end.
+
+gather_word_timezone(T = #tokenizer{input_pos = Pos, input_string = Input}) when Pos >= length(Input) ->
+    {ok, #token{type = ?TOKEN_WORD, string = T#tokenizer.token_string, location = get_token_location(T)}, T};
+gather_word_timezone(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    T3 = T2#tokenizer{token_string = TokStr ++ [Ch]},
+    case Ch of
+        $] -> {ok, #token{type = ?TOKEN_WORD, string = T3#tokenizer.token_string, location = get_token_location(T3)}, T3};
+        _ -> gather_word_timezone(T3)
+    end.
+
+transition_from_GATHER_DOT_SYMBOL(T) ->
+    T2 = note_start_token(T),
+    gather_dot_symbol(T2, "").
+
+gather_dot_symbol(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}, FullToken) when Pos >= length(Input) ->
+    case length(FullToken) of
+        N when N < 2 ->
+            {ok, #token{type = ?TOKEN_WORD, string = FullToken, location = get_token_location(T)}, T};
+        _ ->
+            SymbolWithoutDot = string:substr(FullToken, 2),
+            {ok, #token{type = ?TOKEN_DOT_SYMBOL, string = SymbolWithoutDot, location = get_token_location(T)}, T}
+    end;
+gather_dot_symbol(T = #tokenizer{input_pos = Pos, input_string = Input, token_string = TokStr}, FullToken) ->
+    Ch = lists:nth(Pos + 1, Input),
+    T2 = advance_position(1, T),
+    case is_whitespace(Ch, T) of
+        true ->
+            case length(FullToken) of
+                N when N < 2 ->
+                    {ok, #token{type = ?TOKEN_WORD, string = FullToken, location = get_token_location(T)}, T};
+                _ ->
+                    SymbolWithoutDot = string:substr(FullToken, 2),
+                    {ok, #token{type = ?TOKEN_DOT_SYMBOL, string = SymbolWithoutDot, location = get_token_location(T)}, T}
+            end;
+        false ->
+            case lists:member(Ch, ";[]{}#") of
+                true ->
+                    T3 = advance_position(-1, T2),
+                    case length(FullToken) of
+                        N when N < 2 ->
+                            {ok, #token{type = ?TOKEN_WORD, string = FullToken, location = get_token_location(T3)}, T3};
+                        _ ->
+                            SymbolWithoutDot = string:substr(FullToken, 2),
+                            {ok, #token{type = ?TOKEN_DOT_SYMBOL, string = SymbolWithoutDot, location = get_token_location(T3)}, T3}
+                    end;
+                false ->
+                    T3 = T2#tokenizer{token_string = TokStr ++ [Ch]},
+                    gather_dot_symbol(T3, FullToken ++ [Ch])
+            end
+    end.
