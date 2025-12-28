@@ -4,6 +4,7 @@
     new/2,
     get_name/1,
     get_forthic_code/1,
+    get_words/1,
     add_word/2,
     add_exportable/2,
     add_exportable_word/2,
@@ -66,6 +67,11 @@ get_name(#forthic_module{name = Name}) ->
 get_forthic_code(#forthic_module{forthic_code = Code}) ->
     Code.
 
+%% Get all words
+-spec get_words(forthic_module()) -> list(forthic_word:word()).
+get_words(#forthic_module{words = Words}) ->
+    Words.
+
 %% ============================================================================
 %% Word Management
 %% ============================================================================
@@ -111,15 +117,19 @@ find_word(Module, Name) ->
 find_dictionary_word(#forthic_module{words = Words}, WordName) ->
     find_word_in_list(lists:reverse(Words), WordName).
 
-%% Find variable and wrap as PushValueWord
+%% Find variable and wrap as ModuleWord that pushes the Variable record
 -spec find_variable(forthic_module(), string()) -> {ok, forthic_word:word()} | not_found.
 find_variable(#forthic_module{variables = Variables}, VarName) ->
     case maps:get(VarName, Variables, undefined) of
         undefined -> not_found;
         Variable ->
-            Value = forthic_variable:get_value(Variable),
-            PushWord = forthic_word:new_push_value_word(VarName, Value),
-            {ok, PushWord}
+            % Create a word that pushes the Variable record to the stack
+            % The Variable record can then be used with !, @, or !@
+            Handler = fun(Interp) ->
+                forthic_interpreter:stack_push(Interp, Variable)
+            end,
+            VarWord = forthic_word:new_module_word(VarName, Handler, undefined),
+            {ok, VarWord}
     end.
 
 %% ============================================================================
@@ -127,12 +137,14 @@ find_variable(#forthic_module{variables = Variables}, VarName) ->
 %% ============================================================================
 
 %% Add variable to module
+%% Note: Value parameter is ignored - values are stored in interpreter's ETS table
 -spec add_variable(forthic_module(), string(), term()) -> forthic_module().
-add_variable(Module = #forthic_module{variables = Variables}, Name, Value) ->
+add_variable(Module = #forthic_module{name = ModuleName, variables = Variables}, Name, _Value) ->
     case maps:is_key(Name, Variables) of
         true -> Module;  % Already exists, don't overwrite
         false ->
-            Variable = forthic_variable:new(Name, Value),
+            % Create Variable record with module name (values stored in ETS, not in record)
+            Variable = forthic_variable:new(Name, ModuleName),
             Module#forthic_module{variables = maps:put(Name, Variable, Variables)}
     end.
 

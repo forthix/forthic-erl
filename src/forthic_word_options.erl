@@ -32,7 +32,8 @@ from_array(FlatArray) when is_list(FlatArray) ->
         0 ->
             try
                 Options = parse_flat_array(FlatArray, #{}),
-                {ok, Options}
+                % Add marker to identify this as word options
+                {ok, maps:put(<<"__word_options__">>, true, Options)}
             catch
                 error:Reason -> {error, Reason}
             end;
@@ -66,20 +67,20 @@ get_with_default(Options, Key, Default) ->
 has(Options, Key) ->
     maps:is_key(Key, Options).
 
-%% Get all keys
+%% Get all keys (excluding internal marker)
 -spec keys(word_options()) -> list(string()).
 keys(Options) ->
-    maps:keys(Options).
+    lists:filter(fun(K) -> K /= <<"__word_options__">> end, maps:keys(Options)).
 
 %% Convert to record (returns same map in Erlang)
 -spec to_record(word_options()) -> word_options().
 to_record(Options) ->
     Options.
 
-%% Get number of options
+%% Get number of options (excluding internal marker)
 -spec count(word_options()) -> non_neg_integer().
 count(Options) ->
-    maps:size(Options).
+    length(keys(Options)).
 
 %% ============================================================================
 %% Private Helper Functions

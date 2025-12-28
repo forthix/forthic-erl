@@ -9,12 +9,18 @@
     stack_peek/1,
     get_stack/1,
     cur_module/1,
+    set_app_module/2,
     module_stack_push/2,
     module_stack_pop/1,
     register_module/3,
     find_module/2,
     find_word/2,
-    run/2
+    run/2,
+    % Variable operations (ETS-based)
+    set_variable/4,
+    get_variable/3,
+    has_variable/3,
+    create_variable/4
 ]).
 
 %% ============================================================================
@@ -29,7 +35,8 @@
     literal_handlers :: list(fun((string()) -> {ok, term()} | {error, term()})),
     is_compiling :: boolean(),
     is_memo_definition :: boolean(),
-    cur_definition :: forthic_word:word() | undefined
+    cur_definition :: forthic_word:word() | undefined,
+    variable_table :: ets:tid()  % ETS table for variable storage
 }).
 
 -type interpreter() :: #interpreter{}.
@@ -44,6 +51,9 @@
 -spec new() -> interpreter().
 new() ->
     AppModule = forthic_module:new("", ""),
+    % Create ETS table for variable storage
+    % Format: {ModuleName :: string(), VarName :: string(), Value :: term()}
+    VarTable = ets:new(forthic_variables, [set, public]),
     #interpreter{
         stack = forthic_stack:new(),
         app_module = AppModule,
@@ -52,7 +62,8 @@ new() ->
         literal_handlers = register_standard_literals(),
         is_compiling = false,
         is_memo_definition = false,
-        cur_definition = undefined
+        cur_definition = undefined,
+        variable_table = VarTable
     }.
 
 %% ============================================================================
@@ -99,6 +110,14 @@ cur_module(#interpreter{module_stack = [Module | _]}) ->
     Module;
 cur_module(#interpreter{app_module = AppModule}) ->
     AppModule.
+
+%% Set app module (updates both app_module and module_stack)
+-spec set_app_module(interpreter(), forthic_module:forthic_module()) -> interpreter().
+set_app_module(Interp = #interpreter{}, NewAppModule) ->
+    Interp#interpreter{
+        app_module = NewAppModule,
+        module_stack = [NewAppModule]
+    }.
 
 %% Push module onto module stack
 -spec module_stack_push(interpreter(), forthic_module:forthic_module()) -> interpreter().
@@ -175,9 +194,11 @@ handle_token(Interp, Token) ->
         comment ->
             {ok, Interp};  % Ignore comments
         start_array ->
-            {ok, Interp};  % Arrays handled in tokenizer for now
+            % Push the token onto the stack as a marker
+            stack_push(Interp, Token);
         end_array ->
-            {ok, Interp};
+            % Collect items from stack until START_ARRAY token is found
+            handle_end_array_token(Interp);
         start_module ->
             handle_start_module_token(Interp, Token);
         end_module ->
@@ -228,6 +249,30 @@ handle_start_module_token(Interp, Token) ->
 %% Handle end module token
 handle_end_module_token(Interp) ->
     module_stack_pop(Interp).
+
+%% Handle end array token - collect items until START_ARRAY token is found
+handle_end_array_token(Interp) ->
+    collect_array_items(Interp, []).
+
+%% Collect array items from stack until START_ARRAY token
+collect_array_items(Interp, Items) ->
+    case stack_pop(Interp) of
+        {ok, Token, Interp2} when is_record(Token, token) ->
+            case Token#token.type of
+                start_array ->
+                    % Found the start marker, push collected items as array
+                    % Items are already in correct order due to [Item | Items] accumulation
+                    stack_push(Interp2, Items);
+                _ ->
+                    % Not start_array, add to items and continue
+                    collect_array_items(Interp2, [Token | Items])
+            end;
+        {ok, Item, Interp2} ->
+            % Regular item, add to collection and continue
+            collect_array_items(Interp2, [Item | Items]);
+        {error, _} = Error ->
+            Error
+    end.
 
 %% Handle start definition token
 handle_start_def_token(Interp, Token) ->
@@ -293,3 +338,35 @@ register_standard_literals() ->
         fun forthic_literals:to_int/1,
         fun forthic_literals:to_float/1
     ].
+
+%% ============================================================================
+%% Variable Operations (ETS-based)
+%% ============================================================================
+
+%% Set variable value in ETS table
+%% Key format: {ModuleName, VarName}
+-spec set_variable(interpreter(), string(), string(), term()) -> ok.
+set_variable(#interpreter{variable_table = Table}, ModuleName, VarName, Value) ->
+    ets:insert(Table, {{ModuleName, VarName}, Value}),
+    ok.
+
+%% Get variable value from ETS table
+-spec get_variable(interpreter(), string(), string()) -> {ok, term()} | not_found.
+get_variable(#interpreter{variable_table = Table}, ModuleName, VarName) ->
+    case ets:lookup(Table, {ModuleName, VarName}) of
+        [{{ModuleName, VarName}, Value}] -> {ok, Value};
+        [] -> not_found
+    end.
+
+%% Check if variable exists
+-spec has_variable(interpreter(), string(), string()) -> boolean().
+has_variable(#interpreter{variable_table = Table}, ModuleName, VarName) ->
+    case ets:lookup(Table, {ModuleName, VarName}) of
+        [_] -> true;
+        [] -> false
+    end.
+
+%% Create variable with initial value
+-spec create_variable(interpreter(), string(), string(), term()) -> ok.
+create_variable(Interp, ModuleName, VarName, InitialValue) ->
+    set_variable(Interp, ModuleName, VarName, InitialValue).

@@ -6,20 +6,25 @@
 %% ============================================================================
 
 create_test() ->
-    Var = forthic_variable:new("my_var", 42),
+    Interp = forthic_interpreter:new(),
+    Var = forthic_variable:new("my_var", "app"),
     ?assertEqual("my_var", forthic_variable:get_name(Var)),
-    ?assertEqual(42, forthic_variable:get_value(Var)).
+    % Initial value should be null
+    ?assertEqual(null, forthic_variable:get_value(Var, Interp)).
 
 set_value_test() ->
-    Var = forthic_variable:new("my_var", 42),
-    Var2 = forthic_variable:set_value(Var, 99),
-    ?assertEqual(99, forthic_variable:get_value(Var2)),
-    ?assertEqual("my_var", forthic_variable:get_name(Var2)).
+    Interp = forthic_interpreter:new(),
+    Var = forthic_variable:new("my_var", "app"),
+    forthic_variable:set_value(Var, 99, Interp),
+    ?assertEqual(99, forthic_variable:get_value(Var, Interp)),
+    ?assertEqual("my_var", forthic_variable:get_name(Var)).
 
 immutability_test() ->
-    Var = forthic_variable:new("my_var", 42),
-    Var2 = forthic_variable:set_value(Var, 99),
-    % Original variable unchanged
-    ?assertEqual(42, forthic_variable:get_value(Var)),
-    % New variable has new value
-    ?assertEqual(99, forthic_variable:get_value(Var2)).
+    Interp = forthic_interpreter:new(),
+    Var = forthic_variable:new("my_var", "app"),
+    forthic_variable:set_value(Var, 42, Interp),
+    ?assertEqual(42, forthic_variable:get_value(Var, Interp)),
+    % Set new value
+    forthic_variable:set_value(Var, 99, Interp),
+    % Variable now has new value (values are mutable in ETS)
+    ?assertEqual(99, forthic_variable:get_value(Var, Interp)).
