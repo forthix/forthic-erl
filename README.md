@@ -135,7 +135,7 @@ This runtime supports calling words from other Forthic runtimes via gRPC:
 
 ## License
 
-Apache 2.0
+BSD 2-CLAUSE
 
 ## Links
 
