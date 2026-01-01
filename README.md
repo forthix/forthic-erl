@@ -6,6 +6,8 @@ An Erlang/OTP implementation of the Forthic stack-based concatenative programmin
 
 Forthic is a stack-based, concatenative language designed for composable transformations. This is the official Erlang runtime implementation, providing full compatibility with other Forthic runtimes and leveraging the power of OTP for distributed computing.
 
+**[Learn more at forthix.com →](https://forthix.com)**
+
 ## Features
 
 - ✅ Complete Forthic language implementation
@@ -139,6 +141,8 @@ BSD 2-CLAUSE
 
 ## Links
 
+- **[forthix.com](https://forthix.com)** - Learn about Forthic and Categorical Coding
+- **[Category Theory for Coders](https://forthix.com/blog/category-theory-for-the-rest-of-us-coders)** - Understand the foundations
 - [Forthic Language Specification](https://github.com/forthix/forthic)
 - [TypeScript Runtime](https://github.com/forthix/forthic-ts) (reference implementation)
 - [Documentation](https://forthix.github.io/forthic-erl)
